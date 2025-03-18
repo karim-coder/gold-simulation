@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-// import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import {
   LineChart,
   Line,
@@ -13,8 +13,16 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import { Upload } from "lucide-react";
-import { lastTwoYearsGoldPriceData, goldPriceHistory } from "@/lib/data";
+import { Play } from "lucide-react";
+import { goldPriceHistory } from "@/lib/data";
+
+// type GoldPriceDataType = {
+//   currentPrice: number;
+//   openingPrice: number;
+//   highestPrice: number;
+//   lowestPrice: number;
+//   date: string;
+// };
 
 type TradeData = {
   entry: string;
@@ -27,25 +35,35 @@ type TradeData = {
   pnl: number;
 };
 
+type OpenPosition = {
+  entryDate: string;
+  entryPrice: number;
+  currentPrice: number;
+  highestPrice: number;
+  baseAmount: number;
+  leveragedAmount: number;
+  unrealizedPnl: number;
+};
+
 type SimulationResults = {
-  final_capital: number;
-  total_profit_loss: number;
-  total_trades: number;
-  total_fees: number;
-  equity_curve: { date: string; equity: number }[];
-  trade_history: TradeData[];
-  success_rate: number;
-  max_drawdown: number;
-  max_consecutive_losses: number;
-  avg_profit_per_trade: number;
-  open_position: TradeData | null;
+  finalCapital: number;
+  totalProfitLoss: number;
+  totalTrades: number;
+  totalFees: number;
+  equityCurve: { date: string; equity: number }[];
+  tradeHistory: TradeData[];
+  successRate: number;
+  maxDrawdown: number;
+  maxConsecutiveLosses: number;
+  avgProfitPerTrade: number;
+  openPositions: OpenPosition[];
 };
 
 type SimulationParams = {
   investmentCapital: number;
-  positionSize: number;
+  positionSizePercent: number;
   leverage: number;
-  stopLoss: number;
+  stopLossDollar: number;
   minPriceMovement: number;
   dailyFees: number;
   useTrailingStop: boolean;
@@ -53,9 +71,10 @@ type SimulationParams = {
 
 const validateParams = (params: SimulationParams): boolean => {
   if (params.investmentCapital <= 0) return false;
-  if (params.positionSize <= 0 || params.positionSize > 100) return false;
+  if (params.positionSizePercent <= 0 || params.positionSizePercent > 100)
+    return false;
   if (params.leverage <= 0 || params.leverage > 100) return false;
-  if (params.stopLoss <= 0) return false;
+  if (params.stopLossDollar <= 0) return false;
   if (params.minPriceMovement <= 0) return false;
   if (params.dailyFees < 0) return false;
   return true;
@@ -79,25 +98,48 @@ const calculateDrawdown = (equityCurve: { equity: number }[]): number => {
 const TradingSimulator: React.FC = () => {
   const [params, setParams] = useState<SimulationParams>({
     investmentCapital: 10000, // Starting capital in USD
-    positionSize: 1, // 1% risk per trade
+    positionSizePercent: 1, // 2% risk per trade
     leverage: 100, // 100x leverage
-    stopLoss: 200, // $200 USD stop loss
-    minPriceMovement: 0.3, // 0.3% minimum price movement
+    stopLossDollar: 200, // $200 USD stop loss
+    minPriceMovement: 0.3, // 0.3% minimum price movement threshold
     dailyFees: 2, // $2 USD daily fees
-    useTrailingStop: true, // Enable trailing stop by default
+    useTrailingStop: true, // Use trailing stop by default
   });
 
   const [results, setResults] = useState<SimulationResults | null>(null);
   const [activeTradeIndex, setActiveTradeIndex] = useState<number | null>(null);
+  const [showGoldChart, setShowGoldChart] = useState<boolean>(true);
 
-  const shouldEnterTrade = (
+  const shouldOpenPosition = (
     currentPrice: number,
     previousPrice: number,
     threshold: number
   ): boolean => {
     const priceMovement =
       ((currentPrice - previousPrice) / previousPrice) * 100;
-    return priceMovement >= threshold; // Only LONG positions when price increases
+    // Only open LONG positions when price increases by the threshold percentage
+    return priceMovement >= threshold;
+  };
+
+  // Check if stop loss is triggered
+  const isStopLossTriggered = (
+    currentPrice: number,
+    highestPrice: number,
+    leveragedAmount: number,
+    stopLossAmount: number,
+    useTrailing: boolean
+  ): boolean => {
+    if (!useTrailing) {
+      // Fixed stop loss based on entry price (not trailing)
+      return false; // Not implemented as per requirements
+    }
+
+    // Trailing stop loss calculation
+    const percentageDropFromHighest =
+      (highestPrice - currentPrice) / highestPrice;
+    const dollarLoss = leveragedAmount * percentageDropFromHighest;
+
+    return dollarLoss >= stopLossAmount;
   };
 
   const runSimulation = () => {
@@ -115,20 +157,26 @@ const TradingSimulator: React.FC = () => {
 
     const equityCurve: { date: string; equity: number }[] = [];
     const tradeHistory: TradeData[] = [];
+    const openPositions: OpenPosition[] = [];
 
-    let openPosition: {
+    // Array to track all open positions
+    const activePositions: {
       entryPrice: number;
       entryDate: string;
+      highestPrice: number;
       baseAmount: number;
       leveragedAmount: number;
-      highestPrice: number;
-    } | null = null;
+    }[] = [];
 
     let lastTradeDate: string | null = null;
 
-    for (let index = 1; index < lastTwoYearsGoldPriceData.length; index++) {
-      const { date, price } = lastTwoYearsGoldPriceData[index];
-      const previousPrice = lastTwoYearsGoldPriceData[index - 1].price;
+    // Use goldPriceHistory for more detailed price data
+    for (let index = 1; index < goldPriceHistory.length; index++) {
+      const currentData = goldPriceHistory[index];
+      const previousData = goldPriceHistory[index - 1];
+
+      const { date, openingPrice, highestPrice, lowestPrice, currentPrice } =
+        currentData;
 
       if (currentCapital <= 0) break;
 
@@ -143,73 +191,78 @@ const TradingSimulator: React.FC = () => {
         }
       }
 
-      // Check for trade entry - LONG positions only
-      if (!openPosition && currentCapital > 0) {
-        const shouldEnter = shouldEnterTrade(
-          price,
-          previousPrice,
+      // Check for new position entry
+      if (currentCapital > 0) {
+        const shouldOpen = shouldOpenPosition(
+          openingPrice,
+          previousData.openingPrice,
           params.minPriceMovement
         );
 
-        if (shouldEnter) {
-          // Calculate base amount and leveraged position size
-          const baseAmount = (params.positionSize / 100) * currentCapital;
+        if (shouldOpen) {
+          // Calculate base amount and leveraged position
+          const baseAmount = Math.min(
+            (params.positionSizePercent / 100) * currentCapital,
+            currentCapital
+          );
+
           const leveragedAmount = baseAmount * params.leverage;
 
-          openPosition = {
-            entryPrice: price,
+          activePositions.push({
+            entryPrice: openingPrice,
             entryDate: date,
+            highestPrice: openingPrice, // Initialize highest price to entry price
             baseAmount,
             leveragedAmount,
-            highestPrice: price, // Initialize highest price with entry price
-          };
+          });
+
+          currentCapital -= baseAmount; // Deduct base amount from capital
           tradesExecuted++;
         }
       }
 
-      // Manage open positions with trailing stop
-      if (openPosition) {
-        // Update highest price reached during the trade
-        if (price > openPosition.highestPrice) {
-          openPosition.highestPrice = price;
+      // Handle existing positions
+      for (let i = activePositions.length - 1; i >= 0; i--) {
+        const position = activePositions[i];
+
+        // Update highest price if new high is reached
+        if (highestPrice > position.highestPrice) {
+          position.highestPrice = highestPrice;
         }
 
-        // Calculate P&L
-        const positionValue =
-          openPosition.leveragedAmount * (price / openPosition.entryPrice);
-        const pnl = positionValue - openPosition.leveragedAmount;
+        // Check if stop loss is triggered (using the lowest price of the day)
+        const stopLossTriggered = isStopLossTriggered(
+          lowestPrice,
+          position.highestPrice,
+          position.leveragedAmount,
+          params.stopLossDollar,
+          params.useTrailingStop
+        );
 
-        // Calculate stop loss trigger based on trailing stop
-        let stopLossTriggered = false;
-
-        if (params.useTrailingStop) {
-          // For trailing stop: calculate from highest price reached
-          const highestValue =
-            openPosition.leveragedAmount *
-            (openPosition.highestPrice / openPosition.entryPrice);
-          const currentValue =
-            openPosition.leveragedAmount * (price / openPosition.entryPrice);
-          const drawdown = highestValue - currentValue;
-
-          stopLossTriggered = drawdown >= params.stopLoss;
-        } else {
-          // For fixed stop: calculate from entry price
-          stopLossTriggered = pnl <= -params.stopLoss;
-        }
-
-        // Close position if stop loss triggered
         if (stopLossTriggered) {
-          currentCapital += pnl;
+          // Calculate the price at which the stop loss would trigger
+          const percentageDrop =
+            params.stopLossDollar / position.leveragedAmount;
+          const stopLossPrice = position.highestPrice * (1 - percentageDrop);
+
+          // Calculate P&L
+          const percentageChange =
+            (stopLossPrice - position.entryPrice) / position.entryPrice;
+          const pnl = position.leveragedAmount * percentageChange;
+
+          // Add back the base amount plus any profit (or minus any loss)
+          currentCapital += position.baseAmount + pnl;
           totalProfitLoss += pnl;
 
+          // Record trade
           tradeHistory.push({
-            entry: openPosition.entryDate,
+            entry: position.entryDate,
             exit: date,
-            entryPrice: openPosition.entryPrice,
-            exitPrice: price,
-            highestPrice: openPosition.highestPrice,
-            baseAmount: openPosition.baseAmount,
-            leveragedAmount: openPosition.leveragedAmount,
+            entryPrice: position.entryPrice,
+            exitPrice: stopLossPrice,
+            highestPrice: position.highestPrice,
+            baseAmount: position.baseAmount,
+            leveragedAmount: position.leveragedAmount,
             pnl,
           });
 
@@ -224,42 +277,60 @@ const TradingSimulator: React.FC = () => {
             consecutiveLosses = 0;
           }
 
-          openPosition = null;
+          // Remove the position
+          activePositions.splice(i, 1);
         }
       }
 
       equityCurve.push({
         date,
-        equity: currentCapital,
+        equity:
+          currentCapital +
+          activePositions.reduce((sum, pos) => {
+            // Calculate current value of each position
+            const unrealizedPnL =
+              pos.leveragedAmount *
+              ((currentPrice - pos.entryPrice) / pos.entryPrice);
+            return sum + pos.baseAmount + unrealizedPnL;
+          }, 0),
       });
     }
 
-    // Close any open position at the end of simulation using last available price
-    if (openPosition) {
+    // Close any remaining open positions at the end of simulation
+    if (activePositions.length > 0) {
       const lastPrice =
-        lastTwoYearsGoldPriceData[lastTwoYearsGoldPriceData.length - 1].price;
-      const positionValue =
-        openPosition.leveragedAmount * (lastPrice / openPosition.entryPrice);
-      const pnl = positionValue - openPosition.leveragedAmount;
+        goldPriceHistory[goldPriceHistory.length - 1].currentPrice;
 
-      currentCapital += pnl;
-      totalProfitLoss += pnl;
+      activePositions.forEach((position) => {
+        const percentageChange =
+          (lastPrice - position.entryPrice) / position.entryPrice;
+        const pnl = position.leveragedAmount * percentageChange;
 
-      const lastDate =
-        lastTwoYearsGoldPriceData[lastTwoYearsGoldPriceData.length - 1].date;
+        currentCapital += position.baseAmount + pnl;
+        totalProfitLoss += pnl;
 
-      const finalTrade = {
-        entry: openPosition.entryDate,
-        exit: lastDate,
-        entryPrice: openPosition.entryPrice,
-        exitPrice: lastPrice,
-        highestPrice: openPosition.highestPrice,
-        baseAmount: openPosition.baseAmount,
-        leveragedAmount: openPosition.leveragedAmount,
-        pnl,
-      };
+        tradeHistory.push({
+          entry: position.entryDate,
+          exit: goldPriceHistory[goldPriceHistory.length - 1].date,
+          entryPrice: position.entryPrice,
+          exitPrice: lastPrice,
+          highestPrice: position.highestPrice,
+          baseAmount: position.baseAmount,
+          leveragedAmount: position.leveragedAmount,
+          pnl,
+        });
 
-      tradeHistory.push(finalTrade);
+        // Add to open positions list for display
+        openPositions.push({
+          entryDate: position.entryDate,
+          entryPrice: position.entryPrice,
+          currentPrice: lastPrice,
+          highestPrice: position.highestPrice,
+          baseAmount: position.baseAmount,
+          leveragedAmount: position.leveragedAmount,
+          unrealizedPnl: pnl,
+        });
+      });
     }
 
     const successRate =
@@ -268,17 +339,17 @@ const TradingSimulator: React.FC = () => {
         : 0;
 
     setResults({
-      final_capital: currentCapital,
-      total_profit_loss: totalProfitLoss,
-      total_trades: tradesExecuted,
-      total_fees: totalFees,
-      equity_curve: equityCurve,
-      trade_history: tradeHistory,
-      success_rate: successRate,
-      max_drawdown: calculateDrawdown(equityCurve),
-      max_consecutive_losses: maxConsecutiveLosses,
-      avg_profit_per_trade: totalProfitLoss / (tradesExecuted || 1),
-      open_position: null,
+      finalCapital: currentCapital,
+      totalProfitLoss: totalProfitLoss,
+      totalTrades: tradesExecuted,
+      totalFees: totalFees,
+      equityCurve: equityCurve,
+      tradeHistory: tradeHistory,
+      successRate: successRate,
+      maxDrawdown: calculateDrawdown(equityCurve),
+      maxConsecutiveLosses: maxConsecutiveLosses,
+      avgProfitPerTrade: totalProfitLoss / (tradesExecuted || 1),
+      openPositions: openPositions,
     });
   };
 
@@ -294,10 +365,19 @@ const TradingSimulator: React.FC = () => {
   const renderGoldPriceChart = () => {
     if (!results) return null;
 
+    // Prepare data for gold price chart
+    const chartData = goldPriceHistory.map((item) => ({
+      date: item.date,
+      price: item.currentPrice,
+      high: item.highestPrice,
+      low: item.lowestPrice,
+      open: item.openingPrice,
+    }));
+
     return (
       <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={lastTwoYearsGoldPriceData}>
+          <LineChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="date" angle={-45} textAnchor="end" height={80} />
             <YAxis domain={["auto", "auto"]} />
@@ -309,15 +389,15 @@ const TradingSimulator: React.FC = () => {
               dot={false}
             />
             {activeTradeIndex !== null &&
-              results.trade_history[activeTradeIndex] && (
+              results.tradeHistory[activeTradeIndex] && (
                 <>
                   <ReferenceLine
-                    x={results.trade_history[activeTradeIndex].entry}
+                    x={results.tradeHistory[activeTradeIndex].entry}
                     stroke="green"
                     label="Entry"
                   />
                   <ReferenceLine
-                    x={results.trade_history[activeTradeIndex].exit}
+                    x={results.tradeHistory[activeTradeIndex].exit}
                     stroke="red"
                     label="Exit"
                   />
@@ -329,112 +409,25 @@ const TradingSimulator: React.FC = () => {
     );
   };
 
-  const renderTradeDetails = () => {
-    if (!results || results.trade_history.length === 0) return null;
-
-    return (
-      <div className="mt-4 overflow-x-auto">
-        <div className="text-lg font-semibold mb-2">Trade History</div>
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Trade
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Entry Date
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Entry Price
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Exit Date
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Exit Price
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Highest Price
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Base Amount
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Leveraged Amount
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                P&L
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {results.trade_history.map((trade, index) => (
-              <tr
-                key={index}
-                className={`hover:bg-gray-100 cursor-pointer ${
-                  activeTradeIndex === index ? "bg-blue-50" : ""
-                }`}
-                onClick={() => setActiveTradeIndex(index)}
-              >
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  {index + 1}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  {trade.entry}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  ${trade.entryPrice.toFixed(2)}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  {trade.exit}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  ${trade.exitPrice.toFixed(2)}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  ${trade.highestPrice.toFixed(2)}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  {formatCurrency(trade.baseAmount)}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  {formatCurrency(trade.leveragedAmount)}
-                </td>
-                <td
-                  className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${
-                    trade.pnl >= 0 ? "text-green-600" : "text-red-600"
-                  }`}
-                >
-                  {formatCurrency(trade.pnl)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    );
-  };
-
   return (
     <div className="space-y-4 p-4">
       <Card>
         <CardHeader>
-          <CardTitle>Gold Trading Simulator (Long Only)</CardTitle>
+          <CardTitle>Gold Trading Simulator</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="mb-6">
             <div className="text-sm text-gray-500 mt-2">
-              {lastTwoYearsGoldPriceData.length} price points loaded from static
-              data
+              {goldPriceHistory.length} price points loaded from historical gold
+              price data
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
             <div className="space-y-2">
-              <label className="text-sm font-medium">
-                Starting Capital ($)
-              </label>
+              <Label htmlFor="investmentCapital">Starting Capital ($)</Label>
               <Input
+                id="investmentCapital"
                 type="number"
                 value={params.investmentCapital}
                 onChange={(e) =>
@@ -445,26 +438,28 @@ const TradingSimulator: React.FC = () => {
                 }
               />
             </div>
+
             <div className="space-y-2">
-              <label className="text-sm font-medium">
+              <Label htmlFor="positionSizePercent">
                 Position Size (% of capital)
-              </label>
+              </Label>
               <Input
+                id="positionSizePercent"
                 type="number"
-                value={params.positionSize}
+                value={params.positionSizePercent}
                 onChange={(e) =>
                   setParams({
                     ...params,
-                    positionSize: parseFloat(e.target.value),
+                    positionSizePercent: parseFloat(e.target.value),
                   })
                 }
               />
             </div>
+
             <div className="space-y-2">
-              <label className="text-sm font-medium">
-                Leverage (multiplier)
-              </label>
+              <Label htmlFor="leverage">Leverage Multiplier</Label>
               <Input
+                id="leverage"
                 type="number"
                 value={params.leverage}
                 onChange={(e) =>
@@ -472,21 +467,28 @@ const TradingSimulator: React.FC = () => {
                 }
               />
             </div>
+
             <div className="space-y-2">
-              <label className="text-sm font-medium">Stop Loss ($)</label>
+              <Label htmlFor="stopLossDollar">Stop Loss Amount ($)</Label>
               <Input
+                id="stopLossDollar"
                 type="number"
-                value={params.stopLoss}
+                value={params.stopLossDollar}
                 onChange={(e) =>
-                  setParams({ ...params, stopLoss: parseFloat(e.target.value) })
+                  setParams({
+                    ...params,
+                    stopLossDollar: parseFloat(e.target.value),
+                  })
                 }
               />
             </div>
+
             <div className="space-y-2">
-              <label className="text-sm font-medium">
+              <Label htmlFor="minPriceMovement">
                 Min Price Movement (% threshold)
-              </label>
+              </Label>
               <Input
+                id="minPriceMovement"
                 type="number"
                 value={params.minPriceMovement}
                 onChange={(e) =>
@@ -497,9 +499,11 @@ const TradingSimulator: React.FC = () => {
                 }
               />
             </div>
+
             <div className="space-y-2">
-              <label className="text-sm font-medium">Daily Fees ($)</label>
+              <Label htmlFor="dailyFees">Daily Fees ($)</Label>
               <Input
+                id="dailyFees"
                 type="number"
                 value={params.dailyFees}
                 onChange={(e) =>
@@ -512,7 +516,7 @@ const TradingSimulator: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center space-x-2 mb-6">
+          {/* <div className="flex items-center space-x-2 mb-6">
             <input
               type="checkbox"
               id="useTrailingStop"
@@ -521,16 +525,87 @@ const TradingSimulator: React.FC = () => {
                 setParams({ ...params, useTrailingStop: e.target.checked })
               }
             />
-            <label
-              htmlFor="useTrailingStop"
-              className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-            >
-              Use Trailing Stop Loss
-            </label>
-          </div>
+            <label htmlFor="useTrailingStop">Use Trailing Stop</label>
+          </div> */}
+          {/* <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-lg p-6 my-4 shadow-sm">
+            <h3 className="text-lg font-semibold text-indigo-800 mb-2 flex items-center">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-5 w-5 mr-2"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              Understanding Minimum Price Movement
+            </h3>
 
+            <p className="text-gray-700 mb-3">
+              The minimum price movement threshold determines when a new trade
+              should be opened. It's expressed as a percentage change between
+              consecutive price points.
+            </p>
+
+            <div className="bg-white p-4 rounded border border-blue-100 mb-4">
+              <span className="font-medium text-indigo-700 block mb-2">
+                Detailed Example:
+              </span>
+              <p className="mb-2">
+                Let's say you're trading gold with current price $1,950 per
+                ounce:
+              </p>
+              <ul className="list-disc pl-5 space-y-1 text-sm">
+                <li>
+                  <span className="font-medium">With 0.3% threshold</span>: A
+                  new position will only open when gold price reaches at least
+                  $1,955.85 (a 0.3% increase)
+                </li>
+                <li>
+                  <span className="font-medium">With 0.1% threshold</span>: A
+                  new position would open much sooner, when gold reaches
+                  $1,951.95 (just a 0.1% increase)
+                </li>
+                <li>
+                  <span className="font-medium">With 0.5% threshold</span>: The
+                  system would be more selective, waiting for gold to reach
+                  $1,959.75 before opening a position
+                </li>
+              </ul>
+            </div>
+
+            <div className="flex items-start space-x-2 text-sm text-gray-600">
+              <div className="flex-shrink-0 mt-1">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="h-4 w-4 text-amber-500"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                  />
+                </svg>
+              </div>
+              <p>
+                Higher values make the system less sensitive, resulting in fewer
+                but potentially stronger trend-following trades. Lower values
+                make it more sensitive, potentially capturing smaller price
+                movements but may generate more frequent trades and higher fees.
+              </p>
+            </div>
+          </div> */}
           <Button onClick={runSimulation} className="w-full">
-            <Upload className="mr-2 h-4 w-4" /> Run Simulation
+            <Play className="mr-2 h-4 w-4" /> Run Simulation
           </Button>
         </CardContent>
       </Card>
@@ -538,10 +613,16 @@ const TradingSimulator: React.FC = () => {
       {results && (
         <>
           <Card>
-            <CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Gold Price Chart</CardTitle>
+              <Button
+                variant="outline"
+                onClick={() => setShowGoldChart(!showGoldChart)}
+              >
+                {showGoldChart ? "Hide Chart" : "Show Chart"}
+              </Button>
             </CardHeader>
-            <CardContent>{renderGoldPriceChart()}</CardContent>
+            <CardContent>{showGoldChart && renderGoldPriceChart()}</CardContent>
           </Card>
 
           <Card>
@@ -554,42 +635,42 @@ const TradingSimulator: React.FC = () => {
                   <div className="text-sm text-gray-600">Total P&L</div>
                   <div
                     className={`text-2xl font-bold ${
-                      results.total_profit_loss >= 0
+                      results.totalProfitLoss >= 0
                         ? "text-green-600"
                         : "text-red-600"
                     }`}
                   >
-                    {formatCurrency(results.total_profit_loss)}
+                    {formatCurrency(results.totalProfitLoss)}
                   </div>
                 </div>
                 <div className="p-4 bg-gray-50 rounded">
                   <div className="text-sm text-gray-600">Final Capital</div>
                   <div className="text-2xl font-bold">
-                    {formatCurrency(results.final_capital)}
+                    {formatCurrency(results.finalCapital)}
                   </div>
                 </div>
                 <div className="p-4 bg-gray-50 rounded">
                   <div className="text-sm text-gray-600">Success Rate</div>
                   <div className="text-2xl font-bold">
-                    {(results.success_rate * 100).toFixed(1)}%
+                    {(results.successRate * 100).toFixed(1)}%
                   </div>
                 </div>
                 <div className="p-4 bg-gray-50 rounded">
                   <div className="text-sm text-gray-600">Total Trades</div>
                   <div className="text-2xl font-bold">
-                    {results.total_trades}
+                    {results.totalTrades}
                   </div>
                 </div>
                 <div className="p-4 bg-gray-50 rounded">
                   <div className="text-sm text-gray-600">Max Drawdown</div>
                   <div className="text-2xl font-bold">
-                    {results.max_drawdown.toFixed(2)}%
+                    {results.maxDrawdown.toFixed(2)}%
                   </div>
                 </div>
                 <div className="p-4 bg-gray-50 rounded">
                   <div className="text-sm text-gray-600">Avg Profit/Trade</div>
                   <div className="text-2xl font-bold">
-                    {formatCurrency(results.avg_profit_per_trade)}
+                    {formatCurrency(results.avgProfitPerTrade)}
                   </div>
                 </div>
                 <div className="p-4 bg-gray-50 rounded">
@@ -597,20 +678,20 @@ const TradingSimulator: React.FC = () => {
                     Max Consecutive Losses
                   </div>
                   <div className="text-2xl font-bold">
-                    {results.max_consecutive_losses}
+                    {results.maxConsecutiveLosses}
                   </div>
                 </div>
                 <div className="p-4 bg-gray-50 rounded">
                   <div className="text-sm text-gray-600">Total Fees</div>
                   <div className="text-2xl font-bold">
-                    {formatCurrency(results.total_fees)}
+                    {formatCurrency(results.totalFees)}
                   </div>
                 </div>
               </div>
 
-              <div className="h-64">
+              <div className="h-64 mb-6">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={results.equity_curve}>
+                  <LineChart data={results.equityCurve}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis
                       dataKey="date"
@@ -630,7 +711,117 @@ const TradingSimulator: React.FC = () => {
                 </ResponsiveContainer>
               </div>
 
-              {renderTradeDetails()}
+              {/* Open Positions Section */}
+              {results.openPositions.length > 0 && (
+                <div className="mb-6">
+                  <h3 className="text-lg font-medium mb-2">Open Positions</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-gray-100">
+                          <th className="p-2 text-left">Entry Date</th>
+                          <th className="p-2 text-right">Entry Price</th>
+                          <th className="p-2 text-right">Current Price</th>
+                          <th className="p-2 text-right">Highest Price</th>
+                          <th className="p-2 text-right">Base Amount</th>
+                          <th className="p-2 text-right">Leveraged Amount</th>
+                          <th className="p-2 text-right">Unrealized P&L</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {results.openPositions.map((position, index) => (
+                          <tr key={index} className="border-b">
+                            <td className="p-2">{position.entryDate}</td>
+                            <td className="p-2 text-right">
+                              ${position.entryPrice.toFixed(2)}
+                            </td>
+                            <td className="p-2 text-right">
+                              ${position.currentPrice.toFixed(2)}
+                            </td>
+                            <td className="p-2 text-right">
+                              ${position.highestPrice.toFixed(2)}
+                            </td>
+                            <td className="p-2 text-right">
+                              {formatCurrency(position.baseAmount)}
+                            </td>
+                            <td className="p-2 text-right">
+                              {formatCurrency(position.leveragedAmount)}
+                            </td>
+                            <td
+                              className={`p-2 text-right ${
+                                position.unrealizedPnl >= 0
+                                  ? "text-green-600"
+                                  : "text-red-600"
+                              }`}
+                            >
+                              {formatCurrency(position.unrealizedPnl)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Trade History Section */}
+              <h3 className="text-lg font-medium mb-2">Trade History</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-100">
+                      <th className="p-2 text-left">Entry Date</th>
+                      <th className="p-2 text-left">Exit Date</th>
+                      <th className="p-2 text-right">Entry Price</th>
+                      <th className="p-2 text-right">Exit Price</th>
+                      <th className="p-2 text-right">Highest Price</th>
+                      <th className="p-2 text-right">Base Amount</th>
+                      <th className="p-2 text-right">Leveraged Amount</th>
+                      <th className="p-2 text-right">P&L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {results.tradeHistory.map((trade, index) => (
+                      <tr
+                        key={index}
+                        className={`border-b cursor-pointer ${
+                          activeTradeIndex === index ? "bg-blue-50" : ""
+                        }`}
+                        onClick={() =>
+                          setActiveTradeIndex(
+                            index === activeTradeIndex ? null : index
+                          )
+                        }
+                      >
+                        <td className="p-2">{trade.entry}</td>
+                        <td className="p-2">{trade.exit}</td>
+                        <td className="p-2 text-right">
+                          ${trade.entryPrice.toFixed(2)}
+                        </td>
+                        <td className="p-2 text-right">
+                          ${trade.exitPrice.toFixed(2)}
+                        </td>
+                        <td className="p-2 text-right">
+                          ${trade.highestPrice.toFixed(2)}
+                        </td>
+                        <td className="p-2 text-right">
+                          {formatCurrency(trade.baseAmount)}
+                        </td>
+                        <td className="p-2 text-right">
+                          {formatCurrency(trade.leveragedAmount)}
+                        </td>
+                        <td
+                          className={`p-2 text-right ${
+                            trade.pnl >= 0 ? "text-green-600" : "text-red-600"
+                          }`}
+                        >
+                          {formatCurrency(trade.pnl)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </CardContent>
           </Card>
         </>
