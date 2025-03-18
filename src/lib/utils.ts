@@ -95,3 +95,31 @@ const calculateMaxConsecutiveLosses = (tradeHistory: TradeRecord[]): number => {
 
   return maxConsecutive;
 };
+
+export interface GoldPriceDataType {
+  currentPrice: number;
+  openingPrice: number;
+  highestPrice: number;
+  lowestPrice: number;
+  date: string;
+}
+
+export interface RawGoldPriceData {
+  c: number;
+  o: number;
+  h: number;
+  l: number;
+  t: number;
+}
+
+export const transformGoldPriceData = (
+  data: RawGoldPriceData[]
+): GoldPriceDataType[] => {
+  return data.map(({ c, o, h, l, t }) => ({
+    currentPrice: c,
+    openingPrice: o,
+    highestPrice: h,
+    lowestPrice: l,
+    date: new Date(t).toLocaleDateString("en-US"),
+  }));
+};

@@ -13,16 +13,19 @@ import {
   ReferenceLine,
 } from "recharts";
 import { Upload } from "lucide-react";
-// import { lowConfidencePrices } from "@/lib/data";
-import { lowConfidencePrices } from "@/lib/lowConfData";
+import { lastTwoYearsGoldPriceData, goldPriceHistory } from "@/lib/data";
 
 type TradeData = {
   entry: string;
   exit: string;
   entryPrice: number;
   exitPrice: number;
+  highestPrice: number;
+  baseAmount: number;
+  leveragedAmount: number;
   pnl: number;
   type: "long" | "short";
+  exitReason: "take profit" | "stop loss" | "end of simulation";
 };
 
 type SimulationResults = {
@@ -36,16 +39,25 @@ type SimulationResults = {
   max_drawdown: number;
   max_consecutive_losses: number;
   avg_profit_per_trade: number;
+  open_position: {
+    entryDate: string;
+    entryPrice: number;
+    currentPrice: number;
+    highestPrice: number;
+    baseAmount: number;
+    leveragedAmount: number;
+    currentPnL: number;
+  } | null;
 };
 
 type SimulationParams = {
   investmentCapital: number;
-  positionSize: number;
+  positionSize: number; // % of capital to risk per trade
   leverage: number;
-  stopLoss: number;
-  profitTarget: number;
-  minPriceMovement: number;
-  dailyFees: number;
+  stopLoss: number; // In USD, from highest price reached
+  profitTarget: number; // In USD
+  minPriceMovement: number; // % threshold for entry
+  dailyFees: number; // USD
 };
 
 const validateParams = (params: SimulationParams): boolean => {
@@ -74,13 +86,21 @@ const calculateDrawdown = (equityCurve: { equity: number }[]): number => {
   return maxDrawdown;
 };
 
+// Helper function to format numbers with commas
+const formatNumber = (num: number): string => {
+  return num.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
+
 const TradingSimulator: React.FC = () => {
   const [params, setParams] = useState<SimulationParams>({
     investmentCapital: 10000, // Starting capital in USD
-    positionSize: 2, // 2% risk per trade
+    positionSize: 1, // 1% risk per trade
     leverage: 100, // 100x leverage
-    stopLoss: 25, // $25 USD stop loss
-    profitTarget: 50, // $50 USD profit target
+    stopLoss: 200, // $200 USD trailing stop loss
+    profitTarget: 500, // $500 USD profit target
     minPriceMovement: 0.3, // 0.3% minimum price movement
     dailyFees: 2, // $2 USD daily fees
   });
@@ -88,17 +108,25 @@ const TradingSimulator: React.FC = () => {
   const [results, setResults] = useState<SimulationResults | null>(null);
   const [activeTradeIndex, setActiveTradeIndex] = useState<number | null>(null);
 
-  const shouldEnterTrade = (
+  // Check if we should enter a long position based on price movement
+  const shouldEnterLongPosition = (
     currentPrice: number,
     previousPrice: number,
     threshold: number
-  ): { shouldEnter: boolean; type: "long" | "short" } => {
+  ): boolean => {
     const priceMovement =
       ((currentPrice - previousPrice) / previousPrice) * 100;
-    return {
-      shouldEnter: Math.abs(priceMovement) >= threshold,
-      type: priceMovement > 0 ? "long" : "short",
-    };
+    return priceMovement >= threshold;
+  };
+
+  // Calculate the PnL for a position based on entry price, current price, and leveraged amount
+  const calculatePnL = (
+    entryPrice: number,
+    currentPrice: number,
+    leveragedAmount: number
+  ): number => {
+    const priceChange = (currentPrice - entryPrice) / entryPrice;
+    return leveragedAmount * priceChange;
   };
 
   const runSimulation = () => {
@@ -120,15 +148,17 @@ const TradingSimulator: React.FC = () => {
     let openPosition: {
       entryPrice: number;
       entryDate: string;
-      marketValue: number;
-      type: "long" | "short";
+      baseAmount: number;
+      leveragedAmount: number;
+      highestPrice: number;
+      type: "long";
     } | null = null;
 
     let lastTradeDate: string | null = null;
 
-    for (let index = 1; index < lowConfidencePrices.length; index++) {
-      const { date, price } = lowConfidencePrices[index];
-      const previousPrice = lowConfidencePrices[index - 1].price;
+    for (let index = 1; index < lastTwoYearsGoldPriceData.length; index++) {
+      const { date, price } = lastTwoYearsGoldPriceData[index];
+      const previousPrice = lastTwoYearsGoldPriceData[index - 1].price;
 
       if (currentCapital <= 0) break;
 
@@ -143,25 +173,28 @@ const TradingSimulator: React.FC = () => {
         }
       }
 
-      // Check for trade entry
+      // Check for trade entry - LONG only
       if (!openPosition && currentCapital > 0) {
-        const { shouldEnter, type } = shouldEnterTrade(
+        const shouldEnter = shouldEnterLongPosition(
           price,
           previousPrice,
           params.minPriceMovement
         );
 
         if (shouldEnter) {
-          const positionSize = Math.min(
-            (params.positionSize / 100) * currentCapital,
-            currentCapital * (params.leverage / 100)
-          );
+          // Calculate base amount (% of capital)
+          const baseAmount = (params.positionSize / 100) * currentCapital;
+
+          // Calculate leveraged position size
+          const leveragedAmount = baseAmount * params.leverage;
 
           openPosition = {
             entryPrice: price,
             entryDate: date,
-            marketValue: positionSize * params.leverage,
-            type,
+            baseAmount,
+            leveragedAmount,
+            highestPrice: price, // Initialize highest price to entry price
+            type: "long",
           };
           tradesExecuted++;
         }
@@ -169,24 +202,49 @@ const TradingSimulator: React.FC = () => {
 
       // Manage open positions
       if (openPosition) {
-        const priceChange = price - openPosition.entryPrice;
-        const adjustedPriceChange =
-          openPosition.type === "long" ? priceChange : -priceChange;
-        const percentageChange =
-          (adjustedPriceChange / openPosition.entryPrice) * 100;
-        const pnl = (openPosition.marketValue * percentageChange) / 100;
+        // Update highest price if current price is higher
+        if (price > openPosition.highestPrice) {
+          openPosition.highestPrice = price;
+        }
 
-        if (Math.abs(pnl) >= params.stopLoss || pnl >= params.profitTarget) {
+        // Calculate PnL based on entry and current price
+        const pnl = calculatePnL(
+          openPosition.entryPrice,
+          price,
+          openPosition.leveragedAmount
+        );
+
+        // Take profit check
+        const takeProfitTarget = params.profitTarget;
+
+        // Trailing stop loss check - from highest price reached
+        const highestPnL = calculatePnL(
+          openPosition.entryPrice,
+          openPosition.highestPrice,
+          openPosition.leveragedAmount
+        );
+
+        const currentPnLFromHighest = pnl - highestPnL;
+        const stopLossTriggered = currentPnLFromHighest <= -params.stopLoss;
+
+        if (pnl >= takeProfitTarget || stopLossTriggered) {
           currentCapital += pnl;
           totalProfitLoss += pnl;
+
+          const exitReason =
+            pnl >= takeProfitTarget ? "take profit" : "stop loss";
 
           tradeHistory.push({
             entry: openPosition.entryDate,
             exit: date,
             entryPrice: openPosition.entryPrice,
             exitPrice: price,
+            highestPrice: openPosition.highestPrice,
+            baseAmount: openPosition.baseAmount,
+            leveragedAmount: openPosition.leveragedAmount,
             pnl,
-            type: openPosition.type,
+            type: "long",
+            exitReason,
           });
 
           // Track consecutive losses
@@ -210,6 +268,28 @@ const TradingSimulator: React.FC = () => {
       });
     }
 
+    // If we still have an open position at the end of simulation
+    let finalOpenPosition = null;
+    if (openPosition) {
+      const lastPrice =
+        lastTwoYearsGoldPriceData[lastTwoYearsGoldPriceData.length - 1].price;
+      const currentPnL = calculatePnL(
+        openPosition.entryPrice,
+        lastPrice,
+        openPosition.leveragedAmount
+      );
+
+      finalOpenPosition = {
+        entryDate: openPosition.entryDate,
+        entryPrice: openPosition.entryPrice,
+        currentPrice: lastPrice,
+        highestPrice: openPosition.highestPrice,
+        baseAmount: openPosition.baseAmount,
+        leveragedAmount: openPosition.leveragedAmount,
+        currentPnL,
+      };
+    }
+
     const successRate =
       tradeHistory.length > 0
         ? tradeHistory.filter((t) => t.pnl > 0).length / tradeHistory.length
@@ -226,6 +306,7 @@ const TradingSimulator: React.FC = () => {
       max_drawdown: calculateDrawdown(equityCurve),
       max_consecutive_losses: maxConsecutiveLosses,
       avg_profit_per_trade: totalProfitLoss / (tradesExecuted || 1),
+      open_position: finalOpenPosition,
     });
   };
 
@@ -244,7 +325,7 @@ const TradingSimulator: React.FC = () => {
     return (
       <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={lowConfidencePrices}>
+          <LineChart data={lastTwoYearsGoldPriceData}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="date" angle={-45} textAnchor="end" height={80} />
             <YAxis domain={["auto", "auto"]} />
@@ -321,29 +402,114 @@ const TradingSimulator: React.FC = () => {
         <CardContent>
           <div className="mb-6">
             <div className="text-sm text-gray-500 mt-2">
-              {lowConfidencePrices.length} price points loaded from static data
+              {lastTwoYearsGoldPriceData.length} price points loaded from static
+              data
             </div>
           </div>
-          <Button onClick={fetchGoldPrices} className="w-full">
+          <Button onClick={fetchGoldPrices} className="w-full mb-4">
             Get data
           </Button>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-            {Object.entries(params).map(([key, value]) => (
-              <div className="space-y-2" key={key}>
-                <label className="text-sm font-medium">
-                  {key.replace(/([A-Z])/g, " $1").trim()}
-                  {key === "minPriceMovement" && " (% threshold)"}
-                </label>
-                <Input
-                  type="number"
-                  value={value}
-                  onChange={(e) =>
-                    setParams({ ...params, [key]: parseFloat(e.target.value) })
-                  }
-                />
-              </div>
-            ))}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Investment Capital ($)
+              </label>
+              <Input
+                type="number"
+                value={params.investmentCapital}
+                onChange={(e) =>
+                  setParams({
+                    ...params,
+                    investmentCapital: parseFloat(e.target.value),
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Position Size (% of capital)
+              </label>
+              <Input
+                type="number"
+                value={params.positionSize}
+                onChange={(e) =>
+                  setParams({
+                    ...params,
+                    positionSize: parseFloat(e.target.value),
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Leverage (multiplier)
+              </label>
+              <Input
+                type="number"
+                value={params.leverage}
+                onChange={(e) =>
+                  setParams({ ...params, leverage: parseFloat(e.target.value) })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Stop Loss ($)</label>
+              <Input
+                type="number"
+                value={params.stopLoss}
+                onChange={(e) =>
+                  setParams({ ...params, stopLoss: parseFloat(e.target.value) })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Profit Target ($)</label>
+              <Input
+                type="number"
+                value={params.profitTarget}
+                onChange={(e) =>
+                  setParams({
+                    ...params,
+                    profitTarget: parseFloat(e.target.value),
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Min Price Movement (% threshold)
+              </label>
+              <Input
+                type="number"
+                value={params.minPriceMovement}
+                onChange={(e) =>
+                  setParams({
+                    ...params,
+                    minPriceMovement: parseFloat(e.target.value),
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Daily Fees ($)</label>
+              <Input
+                type="number"
+                value={params.dailyFees}
+                onChange={(e) =>
+                  setParams({
+                    ...params,
+                    dailyFees: parseFloat(e.target.value),
+                  })
+                }
+              />
+            </div>
           </div>
 
           <Button onClick={runSimulation} className="w-full">
@@ -425,7 +591,8 @@ const TradingSimulator: React.FC = () => {
                 </div>
               </div>
 
-              <div className="h-64">
+              {/* Equity Curve Chart */}
+              <div className="h-64 mb-6">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={results.equity_curve}>
                     <CartesianGrid strokeDasharray="3 3" />
@@ -445,6 +612,162 @@ const TradingSimulator: React.FC = () => {
                     />
                   </LineChart>
                 </ResponsiveContainer>
+              </div>
+
+              {/* Open Position (if any) */}
+              {results.open_position && (
+                <div className="mb-6">
+                  <h3 className="text-lg font-semibold mb-2">Open Position</h3>
+                  <div className="bg-blue-50 p-4 rounded">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div>
+                        <div className="text-sm text-gray-600">Entry Date</div>
+                        <div className="font-medium">
+                          {results.open_position.entryDate}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-600">Entry Price</div>
+                        <div className="font-medium">
+                          ${formatNumber(results.open_position.entryPrice)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-600">
+                          Current Price
+                        </div>
+                        <div className="font-medium">
+                          ${formatNumber(results.open_position.currentPrice)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-600">
+                          Highest Price
+                        </div>
+                        <div className="font-medium">
+                          ${formatNumber(results.open_position.highestPrice)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-600">Base Amount</div>
+                        <div className="font-medium">
+                          {formatCurrency(results.open_position.baseAmount)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-600">
+                          Leveraged Amount
+                        </div>
+                        <div className="font-medium">
+                          {formatCurrency(
+                            results.open_position.leveragedAmount
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-sm text-gray-600">Current P&L</div>
+                        <div
+                          className={`font-medium ${
+                            results.open_position.currentPnL >= 0
+                              ? "text-green-600"
+                              : "text-red-600"
+                          }`}
+                        >
+                          {formatCurrency(results.open_position.currentPnL)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Trade History */}
+              <div>
+                <h3 className="text-lg font-semibold mb-2">Trade History</h3>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full bg-white border border-gray-200">
+                    <thead>
+                      <tr className="bg-gray-100">
+                        <th className="border px-4 py-2 text-left">#</th>
+                        <th className="border px-4 py-2 text-left">
+                          Entry Date
+                        </th>
+                        <th className="border px-4 py-2 text-left">
+                          Exit Date
+                        </th>
+                        <th className="border px-4 py-2 text-right">
+                          Entry Price
+                        </th>
+                        <th className="border px-4 py-2 text-right">
+                          Highest Price
+                        </th>
+                        <th className="border px-4 py-2 text-right">
+                          Exit Price
+                        </th>
+                        <th className="border px-4 py-2 text-right">
+                          Base Amount
+                        </th>
+                        <th className="border px-4 py-2 text-right">
+                          Leveraged Amount
+                        </th>
+                        <th className="border px-4 py-2 text-right">P&L</th>
+                        <th className="border px-4 py-2 text-center">
+                          Exit Reason
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {results.trade_history.map((trade, index) => (
+                        <tr
+                          key={index}
+                          className={`${
+                            index === activeTradeIndex ? "bg-blue-50" : ""
+                          } hover:bg-gray-50 cursor-pointer`}
+                          onClick={() => setActiveTradeIndex(index)}
+                        >
+                          <td className="border px-4 py-2">{index + 1}</td>
+                          <td className="border px-4 py-2">{trade.entry}</td>
+                          <td className="border px-4 py-2">{trade.exit}</td>
+                          <td className="border px-4 py-2 text-right">
+                            ${formatNumber(trade.entryPrice)}
+                          </td>
+                          <td className="border px-4 py-2 text-right">
+                            ${formatNumber(trade.highestPrice)}
+                          </td>
+                          <td className="border px-4 py-2 text-right">
+                            ${formatNumber(trade.exitPrice)}
+                          </td>
+                          <td className="border px-4 py-2 text-right">
+                            {formatCurrency(trade.baseAmount)}
+                          </td>
+                          <td className="border px-4 py-2 text-right">
+                            {formatCurrency(trade.leveragedAmount)}
+                          </td>
+                          <td
+                            className={`border px-4 py-2 text-right ${
+                              trade.pnl >= 0 ? "text-green-600" : "text-red-600"
+                            }`}
+                          >
+                            {formatCurrency(trade.pnl)}
+                          </td>
+                          <td className="border px-4 py-2 text-center">
+                            <span
+                              className={`px-2 py-1 rounded text-xs ${
+                                trade.exitReason === "take profit"
+                                  ? "bg-green-100 text-green-800"
+                                  : trade.exitReason === "stop loss"
+                                  ? "bg-red-100 text-red-800"
+                                  : "bg-gray-100 text-gray-800"
+                              }`}
+                            >
+                              {trade.exitReason}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </CardContent>
           </Card>
