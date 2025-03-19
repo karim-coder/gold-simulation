@@ -16,14 +16,6 @@ import {
 import { Play } from "lucide-react";
 import { goldPriceHistory } from "@/lib/data";
 
-// type GoldPriceDataType = {
-//   currentPrice: number;
-//   openingPrice: number;
-//   highestPrice: number;
-//   lowestPrice: number;
-//   date: string;
-// };
-
 type TradeData = {
   entry: string;
   exit: string;
@@ -33,6 +25,10 @@ type TradeData = {
   baseAmount: number;
   leveragedAmount: number;
   pnl: number;
+  fees: number;
+  daysHeld: number;
+  remainingCapital: number;
+  capitalAtEntry: number;
 };
 
 type OpenPosition = {
@@ -43,6 +39,8 @@ type OpenPosition = {
   baseAmount: number;
   leveragedAmount: number;
   unrealizedPnl: number;
+  accumulatedFees: number;
+  capitalAtEntry: number;
 };
 
 type SimulationResults = {
@@ -57,6 +55,7 @@ type SimulationResults = {
   maxConsecutiveLosses: number;
   avgProfitPerTrade: number;
   openPositions: OpenPosition[];
+  skippedTrades: number;
 };
 
 type SimulationParams = {
@@ -65,7 +64,7 @@ type SimulationParams = {
   leverage: number;
   stopLossDollar: number;
   minPriceMovement: number;
-  dailyFees: number;
+  dailyFeePercent: number;
   useTrailingStop: boolean;
 };
 
@@ -75,8 +74,8 @@ const validateParams = (params: SimulationParams): boolean => {
     return false;
   if (params.leverage <= 0 || params.leverage > 100) return false;
   if (params.stopLossDollar <= 0) return false;
-  if (params.minPriceMovement <= 0) return false;
-  if (params.dailyFees < 0) return false;
+  if (params.minPriceMovement < 0) return false;
+  if (params.dailyFeePercent < 0) return false;
   return true;
 };
 
@@ -94,7 +93,6 @@ const calculateDrawdown = (equityCurve: { equity: number }[]): number => {
 
   return maxDrawdown;
 };
-
 const TradingSimulator: React.FC = () => {
   const [params, setParams] = useState<SimulationParams>({
     investmentCapital: 10000, // Starting capital in USD
@@ -102,7 +100,7 @@ const TradingSimulator: React.FC = () => {
     leverage: 100, // 100x leverage
     stopLossDollar: 200, // $200 USD stop loss
     minPriceMovement: 0.3, // 0.3% minimum price movement threshold
-    dailyFees: 2, // $2 USD daily fees
+    dailyFeePercent: 0.1, // 0.1% daily fee on open positions
     useTrailingStop: true, // Use trailing stop by default
   });
 
@@ -122,26 +120,6 @@ const TradingSimulator: React.FC = () => {
   };
 
   // Check if stop loss is triggered
-  const isStopLossTriggered = (
-    currentPrice: number,
-    highestPrice: number,
-    leveragedAmount: number,
-    stopLossAmount: number,
-    useTrailing: boolean
-  ): boolean => {
-    if (!useTrailing) {
-      // Fixed stop loss based on entry price (not trailing)
-      return false; // Not implemented as per requirements
-    }
-
-    // Trailing stop loss calculation
-    const percentageDropFromHighest =
-      (highestPrice - currentPrice) / highestPrice;
-    const dollarLoss = leveragedAmount * percentageDropFromHighest;
-
-    return dollarLoss >= stopLossAmount;
-  };
-
   const runSimulation = () => {
     if (!validateParams(params)) {
       alert("Invalid parameters!");
@@ -154,6 +132,7 @@ const TradingSimulator: React.FC = () => {
     let totalFees = 0;
     let consecutiveLosses = 0;
     let maxConsecutiveLosses = 0;
+    let skippedTrades = 0;
 
     const equityCurve: { date: string; equity: number }[] = [];
     const tradeHistory: TradeData[] = [];
@@ -166,11 +145,14 @@ const TradingSimulator: React.FC = () => {
       highestPrice: number;
       baseAmount: number;
       leveragedAmount: number;
+      accumulatedFees: number;
+      lastFeeDate: string;
+      remainingCapitalAtEntry: number;
     }[] = [];
 
-    let lastTradeDate: string | null = null;
+    let currentDate: string | null = null;
 
-    // Use goldPriceHistory for more detailed price data
+    // Loop through price history
     for (let index = 1; index < goldPriceHistory.length; index++) {
       const currentData = goldPriceHistory[index];
       const previousData = goldPriceHistory[index - 1];
@@ -178,50 +160,34 @@ const TradingSimulator: React.FC = () => {
       const { date, openingPrice, highestPrice, lowestPrice, currentPrice } =
         currentData;
 
-      if (currentCapital <= 0) break;
+      // Process fees first
+      if (currentDate !== date) {
+        currentDate = date;
 
-      // Apply daily fees
-      if (lastTradeDate !== date) {
-        if (currentCapital >= params.dailyFees) {
-          currentCapital -= params.dailyFees;
-          totalFees += params.dailyFees;
-          lastTradeDate = date;
-        } else {
-          break;
+        // Apply daily percentage-based fees to all open positions
+        let totalDailyFees = 0;
+
+        for (const position of activePositions) {
+          if (position.lastFeeDate !== date) {
+            const dailyFee =
+              (params.dailyFeePercent / 100) * position.baseAmount;
+            totalDailyFees += dailyFee;
+            position.accumulatedFees += dailyFee;
+            position.lastFeeDate = date;
+          }
+        }
+
+        // Deduct all fees from capital if possible
+        if (currentCapital >= totalDailyFees) {
+          currentCapital -= totalDailyFees;
+          totalFees += totalDailyFees;
+        } else if (currentCapital > 0) {
+          totalFees += currentCapital;
+          currentCapital = 0;
         }
       }
 
-      // Check for new position entry
-      if (currentCapital > 0) {
-        const shouldOpen = shouldOpenPosition(
-          openingPrice,
-          previousData.openingPrice,
-          params.minPriceMovement
-        );
-
-        if (shouldOpen) {
-          // Calculate base amount and leveraged position
-          const baseAmount = Math.min(
-            (params.positionSizePercent / 100) * currentCapital,
-            currentCapital
-          );
-
-          const leveragedAmount = baseAmount * params.leverage;
-
-          activePositions.push({
-            entryPrice: openingPrice,
-            entryDate: date,
-            highestPrice: openingPrice, // Initialize highest price to entry price
-            baseAmount,
-            leveragedAmount,
-          });
-
-          currentCapital -= baseAmount; // Deduct base amount from capital
-          tradesExecuted++;
-        }
-      }
-
-      // Handle existing positions
+      // Process all active positions and check for stop losses
       for (let i = activePositions.length - 1; i >= 0; i--) {
         const position = activePositions[i];
 
@@ -230,7 +196,16 @@ const TradingSimulator: React.FC = () => {
           position.highestPrice = highestPrice;
         }
 
-        // Check if stop loss is triggered (using the lowest price of the day)
+        // Calculate current P&L (excluding fees)
+        const currentPnL =
+          position.leveragedAmount *
+          ((currentPrice - position.entryPrice) / position.entryPrice);
+
+        // Check if position is liquidated due to fees
+        const totalPositionValue = position.baseAmount + currentPnL;
+        const netPositionValue = totalPositionValue - position.accumulatedFees;
+
+        // Check if stop loss is triggered using the day's lowest price
         const stopLossTriggered = isStopLossTriggered(
           lowestPrice,
           position.highestPrice,
@@ -239,34 +214,54 @@ const TradingSimulator: React.FC = () => {
           params.useTrailingStop
         );
 
-        if (stopLossTriggered) {
-          // Calculate the price at which the stop loss would trigger
-          const percentageDrop =
-            params.stopLossDollar / position.leveragedAmount;
-          const stopLossPrice = position.highestPrice * (1 - percentageDrop);
+        // Close position if stop loss is triggered OR if fees have consumed the position value
+        if (stopLossTriggered || netPositionValue <= 0) {
+          let exitPrice, pnl;
 
-          // Calculate P&L
-          const percentageChange =
-            (stopLossPrice - position.entryPrice) / position.entryPrice;
-          const pnl = position.leveragedAmount * percentageChange;
+          if (stopLossTriggered) {
+            // Calculate the price at which the stop loss would trigger
+            const percentageDrop =
+              params.stopLossDollar / position.leveragedAmount;
+            exitPrice = position.highestPrice * (1 - percentageDrop);
 
-          // Add back the base amount plus any profit (or minus any loss)
-          currentCapital += position.baseAmount + pnl;
+            // Calculate P&L based on stop loss price (excluding fees)
+            pnl =
+              position.leveragedAmount *
+              ((exitPrice - position.entryPrice) / position.entryPrice);
+          } else {
+            // Position is closed due to fees consuming the value
+            exitPrice = currentPrice;
+            pnl = currentPnL;
+          }
+
+          // Add back the base amount plus any profit (or minus any loss), then subtract fees
+          // This ensures fees are properly accounted for and don't artificially inflate P&L
+          const amountToReturn = Math.max(
+            0,
+            position.baseAmount + pnl - position.accumulatedFees
+          );
+          currentCapital += amountToReturn;
+
+          // Add only the actual trading P&L (not including fees) to totalProfitLoss
           totalProfitLoss += pnl;
 
-          // Record trade
+          // Record trade with appropriate P&L calculation
           tradeHistory.push({
             entry: position.entryDate,
             exit: date,
             entryPrice: position.entryPrice,
-            exitPrice: stopLossPrice,
+            exitPrice: exitPrice,
             highestPrice: position.highestPrice,
             baseAmount: position.baseAmount,
             leveragedAmount: position.leveragedAmount,
-            pnl,
+            pnl, // P&L from price movement, excluding fees
+            fees: position.accumulatedFees,
+            daysHeld: calculateDaysHeld(position.entryDate, date),
+            remainingCapital: currentCapital,
+            capitalAtEntry: position.remainingCapitalAtEntry,
           });
 
-          // Track consecutive losses
+          // Track consecutive losses based on P&L excluding fees
           if (pnl < 0) {
             consecutiveLosses++;
             maxConsecutiveLosses = Math.max(
@@ -282,57 +277,123 @@ const TradingSimulator: React.FC = () => {
         }
       }
 
+      // Exit the simulation if we have no capital and no positions
+      if (currentCapital <= 0 && activePositions.length === 0) break;
+
+      // Check for new position entry only if we have enough capital
+      const MIN_TRADING_CAPITAL = 100;
+
+      if (currentCapital >= MIN_TRADING_CAPITAL) {
+        const shouldOpen = shouldOpenPosition(
+          openingPrice,
+          previousData.openingPrice,
+          params.minPriceMovement
+        );
+
+        if (shouldOpen) {
+          // Calculate position size correctly as a percentage of current capital
+          const baseAmount = Math.min(
+            (params.positionSizePercent / 100) * currentCapital,
+            currentCapital
+          );
+
+          // Only proceed if base amount is meaningful
+          if (baseAmount >= 1) {
+            const leveragedAmount = baseAmount * params.leverage;
+
+            // Store position with current capital at entry
+            activePositions.push({
+              entryPrice: openingPrice,
+              entryDate: date,
+              highestPrice: openingPrice, // Set initial highest price equal to entry price
+              baseAmount,
+              leveragedAmount,
+              accumulatedFees: 0,
+              lastFeeDate: date,
+              remainingCapitalAtEntry: currentCapital,
+            });
+
+            currentCapital -= baseAmount;
+            tradesExecuted++;
+          }
+        }
+      } else if (
+        shouldOpenPosition(
+          openingPrice,
+          previousData.openingPrice,
+          params.minPriceMovement
+        )
+      ) {
+        // Count trades we would have taken if we had enough capital
+        skippedTrades++;
+      }
+
+      // Update equity curve for this day
       equityCurve.push({
         date,
         equity:
           currentCapital +
           activePositions.reduce((sum, pos) => {
-            // Calculate current value of each position
             const unrealizedPnL =
               pos.leveragedAmount *
               ((currentPrice - pos.entryPrice) / pos.entryPrice);
-            return sum + pos.baseAmount + unrealizedPnL;
+            return (
+              sum +
+              Math.max(0, pos.baseAmount + unrealizedPnL - pos.accumulatedFees)
+            );
           }, 0),
       });
     }
 
     // Close any remaining open positions at the end of simulation
-    if (activePositions.length > 0) {
-      const lastPrice =
-        goldPriceHistory[goldPriceHistory.length - 1].currentPrice;
+    const lastPrice =
+      goldPriceHistory[goldPriceHistory.length - 1].currentPrice;
+    const lastDate = goldPriceHistory[goldPriceHistory.length - 1].date;
 
-      activePositions.forEach((position) => {
-        const percentageChange =
-          (lastPrice - position.entryPrice) / position.entryPrice;
-        const pnl = position.leveragedAmount * percentageChange;
+    activePositions.forEach((position) => {
+      const percentageChange =
+        (lastPrice - position.entryPrice) / position.entryPrice;
+      const pnl = position.leveragedAmount * percentageChange;
 
-        currentCapital += position.baseAmount + pnl;
-        totalProfitLoss += pnl;
+      // Add back adjusted capital
+      const amountToReturn = Math.max(
+        0,
+        position.baseAmount + pnl - position.accumulatedFees
+      );
+      currentCapital += amountToReturn;
+      totalProfitLoss += pnl;
 
-        tradeHistory.push({
-          entry: position.entryDate,
-          exit: goldPriceHistory[goldPriceHistory.length - 1].date,
-          entryPrice: position.entryPrice,
-          exitPrice: lastPrice,
-          highestPrice: position.highestPrice,
-          baseAmount: position.baseAmount,
-          leveragedAmount: position.leveragedAmount,
-          pnl,
-        });
-
-        // Add to open positions list for display
-        openPositions.push({
-          entryDate: position.entryDate,
-          entryPrice: position.entryPrice,
-          currentPrice: lastPrice,
-          highestPrice: position.highestPrice,
-          baseAmount: position.baseAmount,
-          leveragedAmount: position.leveragedAmount,
-          unrealizedPnl: pnl,
-        });
+      // Add to trade history
+      tradeHistory.push({
+        entry: position.entryDate,
+        exit: lastDate,
+        entryPrice: position.entryPrice,
+        exitPrice: lastPrice,
+        highestPrice: position.highestPrice,
+        baseAmount: position.baseAmount,
+        leveragedAmount: position.leveragedAmount,
+        pnl,
+        fees: position.accumulatedFees,
+        daysHeld: calculateDaysHeld(position.entryDate, lastDate),
+        remainingCapital: currentCapital,
+        capitalAtEntry: position.remainingCapitalAtEntry,
       });
-    }
 
+      // For reference only - these positions are closed at the end
+      openPositions.push({
+        entryDate: position.entryDate,
+        entryPrice: position.entryPrice,
+        currentPrice: lastPrice,
+        highestPrice: position.highestPrice,
+        baseAmount: position.baseAmount,
+        leveragedAmount: position.leveragedAmount,
+        unrealizedPnl: pnl,
+        accumulatedFees: position.accumulatedFees,
+        capitalAtEntry: position.remainingCapitalAtEntry,
+      });
+    });
+
+    // Calculate final metrics
     const successRate =
       tradeHistory.length > 0
         ? tradeHistory.filter((t) => t.pnl > 0).length / tradeHistory.length
@@ -350,7 +411,40 @@ const TradingSimulator: React.FC = () => {
       maxConsecutiveLosses: maxConsecutiveLosses,
       avgProfitPerTrade: totalProfitLoss / (tradesExecuted || 1),
       openPositions: openPositions,
+      skippedTrades: skippedTrades,
     });
+  };
+
+  // The corrected stop loss function remains the same
+  const isStopLossTriggered = (
+    currentPrice: number,
+    highestPrice: number,
+    leveragedAmount: number,
+    stopLossAmount: number,
+    useTrailing: boolean
+  ): boolean => {
+    if (!useTrailing) {
+      return false; // Not implemented as per requirements
+    }
+
+    // Calculate percentage drop from highest price
+    const percentageDropFromHighest =
+      (highestPrice - currentPrice) / highestPrice;
+
+    // Calculate dollar loss based on leveraged amount
+    const dollarLoss = leveragedAmount * percentageDropFromHighest;
+
+    // Return true if dollar loss exceeds stop loss amount
+    return dollarLoss >= stopLossAmount;
+  };
+
+  // Helper function to calculate days held
+  const calculateDaysHeld = (startDate: string, endDate: string): number => {
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const diffTime = Math.abs(end.getTime() - start.getTime());
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    return diffDays;
   };
 
   const formatCurrency = (value: number) => {
@@ -361,7 +455,6 @@ const TradingSimulator: React.FC = () => {
       maximumFractionDigits: 2,
     }).format(value);
   };
-
   const renderGoldPriceChart = () => {
     if (!results) return null;
 
@@ -501,15 +594,17 @@ const TradingSimulator: React.FC = () => {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="dailyFees">Daily Fees ($)</Label>
+              <Label htmlFor="dailyFeePercent">
+                Daily Position Funding Fee (%)
+              </Label>
               <Input
-                id="dailyFees"
+                id="dailyFeePercent"
                 type="number"
-                value={params.dailyFees}
+                value={params.dailyFeePercent}
                 onChange={(e) =>
                   setParams({
                     ...params,
-                    dailyFees: parseFloat(e.target.value),
+                    dailyFeePercent: parseFloat(e.target.value),
                   })
                 }
               />
@@ -687,6 +782,12 @@ const TradingSimulator: React.FC = () => {
                     {formatCurrency(results.totalFees)}
                   </div>
                 </div>
+                <div className="p-4 bg-gray-50 rounded">
+                  <div className="text-sm text-gray-600">Skipped Trades</div>
+                  <div className="text-2xl font-bold">
+                    {results.skippedTrades}
+                  </div>
+                </div>
               </div>
 
               <div className="h-64 mb-6">
@@ -714,7 +815,15 @@ const TradingSimulator: React.FC = () => {
               {/* Open Positions Section */}
               {results.openPositions.length > 0 && (
                 <div className="mb-6">
-                  <h3 className="text-lg font-medium mb-2">Open Positions</h3>
+                  <h3 className="text-lg font-medium mb-2">
+                    Open Positions ({results.openPositions.length})
+                  </h3>
+                  {results.openPositions.length > 0 && (
+                    <p className="text-sm text-gray-600 mb-2">
+                      Note: All open positions are closed at the end of the
+                      simulation period and included in trade history.
+                    </p>
+                  )}
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead>
@@ -725,6 +834,8 @@ const TradingSimulator: React.FC = () => {
                           <th className="p-2 text-right">Highest Price</th>
                           <th className="p-2 text-right">Base Amount</th>
                           <th className="p-2 text-right">Leveraged Amount</th>
+                          <th className="p-2 text-right">Total Fees</th>
+                          <th className="p-2 text-right">Capital At Entry</th>
                           <th className="p-2 text-right">Unrealized P&L</th>
                         </tr>
                       </thead>
@@ -747,6 +858,12 @@ const TradingSimulator: React.FC = () => {
                             <td className="p-2 text-right">
                               {formatCurrency(position.leveragedAmount)}
                             </td>
+                            <td className="p-2 text-right text-red-600">
+                              {formatCurrency(position.accumulatedFees)}
+                            </td>
+                            <td className="p-2 text-right text-red-600">
+                              {formatCurrency(position.capitalAtEntry)}
+                            </td>
                             <td
                               className={`p-2 text-right ${
                                 position.unrealizedPnl >= 0
@@ -765,7 +882,9 @@ const TradingSimulator: React.FC = () => {
               )}
 
               {/* Trade History Section */}
-              <h3 className="text-lg font-medium mb-2">Trade History</h3>
+              <h3 className="text-lg font-medium mb-2">
+                Trade History ({results.tradeHistory.length})
+              </h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -777,6 +896,9 @@ const TradingSimulator: React.FC = () => {
                       <th className="p-2 text-right">Highest Price</th>
                       <th className="p-2 text-right">Base Amount</th>
                       <th className="p-2 text-right">Leveraged Amount</th>
+                      <th className="p-2 text-right">Total Fees</th>
+                      <th className="p-2 text-right">Remaining Capital</th>
+                      <th className="p-2 text-right">Capital At Entry</th>
                       <th className="p-2 text-right">P&L</th>
                     </tr>
                   </thead>
@@ -809,6 +931,15 @@ const TradingSimulator: React.FC = () => {
                         </td>
                         <td className="p-2 text-right">
                           {formatCurrency(trade.leveragedAmount)}
+                        </td>
+                        <td className="p-2 text-right text-red-600">
+                          {formatCurrency(trade.fees)}
+                        </td>
+                        <td className="p-2 text-right text-red-600">
+                          {formatCurrency(trade.remainingCapital)}
+                        </td>
+                        <td className="p-2 text-right text-red-600">
+                          {formatCurrency(trade.capitalAtEntry)}
                         </td>
                         <td
                           className={`p-2 text-right ${
