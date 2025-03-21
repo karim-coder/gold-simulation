@@ -79,20 +79,20 @@ const validateParams = (params: SimulationParams): boolean => {
   return true;
 };
 
-const calculateDrawdown = (equityCurve: { equity: number }[]): number => {
-  let maxDrawdown = 0;
-  let peak = equityCurve[0].equity;
+// const calculateDrawdown = (equityCurve: { equity: number }[]): number => {
+//   let maxDrawdown = 0;
+//   let peak = equityCurve[0].equity;
 
-  for (const point of equityCurve) {
-    if (point.equity > peak) {
-      peak = point.equity;
-    }
-    const drawdown = ((peak - point.equity) / peak) * 100;
-    maxDrawdown = Math.max(maxDrawdown, drawdown);
-  }
+//   for (const point of equityCurve) {
+//     if (point.equity > peak) {
+//       peak = point.equity;
+//     }
+//     const drawdown = ((peak - point.equity) / peak) * 100;
+//     maxDrawdown = Math.max(maxDrawdown, drawdown);
+//   }
 
-  return maxDrawdown;
-};
+//   return maxDrawdown;
+// };
 const TradingSimulator: React.FC = () => {
   const [params, setParams] = useState<SimulationParams>({
     investmentCapital: 10000,
@@ -118,7 +118,7 @@ const TradingSimulator: React.FC = () => {
     return priceMovement >= threshold;
   };
 
-  // Simple stop loss function that works for both trailing and fixed stops
+  // Improved stop loss function with proper trailing stop implementation
   const isStopLossTriggered = (
     currentPrice: number,
     highestPrice: number,
@@ -126,7 +126,11 @@ const TradingSimulator: React.FC = () => {
     stopLossAmount: number,
     useTrailing: boolean
   ): boolean => {
-    if (!useTrailing) return false; // Only use trailing stops as specified in requirements
+    if (!useTrailing) {
+      // Fixed stop loss implementation (calculate from entry price)
+      // Not used in current simulation but kept for potential future use
+      return false;
+    }
 
     // Calculate percentage drop from highest price
     const percentageDropFromHighest =
@@ -185,31 +189,29 @@ const TradingSimulator: React.FC = () => {
       if (currentDate !== date) {
         currentDate = date;
 
-        // Apply daily percentage-based fees to all open positions
-        let totalDailyFees = 0;
-
+        // Updated fee deduction logic in the daily processing loop
         for (const position of activePositions) {
           if (position.lastFeeDate !== date) {
             const dailyFee =
               (params.dailyFeePercent / 100) * position.baseAmount;
-            totalDailyFees += dailyFee;
-            position.accumulatedFees += dailyFee;
+
+            if (currentCapital >= dailyFee) {
+              currentCapital -= dailyFee;
+              totalFees += dailyFee;
+              position.accumulatedFees += dailyFee;
+            } else {
+              const feePaid = currentCapital;
+              totalFees += feePaid;
+              position.accumulatedFees += feePaid;
+              currentCapital = 0;
+              break; // Stop processing further positions once capital is gone
+            }
             position.lastFeeDate = date;
           }
         }
-
-        // Deduct all fees from capital if possible
-        if (currentCapital >= totalDailyFees) {
-          currentCapital -= totalDailyFees;
-          totalFees += totalDailyFees;
-        } else if (currentCapital > 0) {
-          totalFees += currentCapital;
-          currentCapital = 0;
-        }
       }
 
-      // IMPORTANT: Always process existing positions on EVERY day
-      // This ensures we check for stop loss conditions on all days
+      // Process existing positions on EVERY day
       for (let i = activePositions.length - 1; i >= 0; i--) {
         const position = activePositions[i];
 
@@ -227,20 +229,13 @@ const TradingSimulator: React.FC = () => {
           params.useTrailingStop
         );
 
-        // IMPORTANT: Also check if accumulated fees have exceeded the reasonable threshold
-        // This is critical with high daily fees like 30%
-        // const feesExceededThreshold =
-        //   position.accumulatedFees >= position.baseAmount * 0.5;
-
         if (stopLossTriggered) {
           // Use the appropriate exit price based on trigger reason
-          const exitPrice = stopLossTriggered
-            ? calculateStopLossPrice(
-                position.highestPrice,
-                position.leveragedAmount,
-                params.stopLossDollar
-              )
-            : currentPrice;
+          const exitPrice = calculateStopLossPrice(
+            position.highestPrice,
+            position.leveragedAmount,
+            params.stopLossDollar
+          );
 
           // Calculate P&L
           const percentageChange =
@@ -248,9 +243,8 @@ const TradingSimulator: React.FC = () => {
           const pnl = position.leveragedAmount * percentageChange;
 
           // Add back the base amount plus any profit (or minus any loss)
-          const amountToReturn =
-            position.baseAmount + pnl - position.accumulatedFees;
-          currentCapital += Math.max(0, amountToReturn); // Prevent negative returns
+          const amountToReturn = position.baseAmount + pnl; // Removed accumulatedFees subtraction
+          currentCapital += amountToReturn; // Removed Math.max(0, ...)
           totalProfitLoss += pnl;
 
           // Record trade
@@ -302,23 +296,21 @@ const TradingSimulator: React.FC = () => {
             currentCapital
           );
 
-          // Only proceed if base amount is meaningful
           if (baseAmount >= 1) {
             const leveragedAmount = baseAmount * params.leverage;
 
-            // Store position with current capital at entry
             activePositions.push({
               entryPrice: openingPrice,
               entryDate: date,
-              highestPrice: openingPrice, // Set initial highest price equal to entry price
+              highestPrice: openingPrice,
               baseAmount,
               leveragedAmount,
               accumulatedFees: 0,
               lastFeeDate: date,
-              remainingCapitalAtEntry: currentCapital,
+              remainingCapitalAtEntry: currentCapital, // Track capital at entry
             });
 
-            currentCapital -= baseAmount;
+            currentCapital -= baseAmount; // Deduct base amount from current capital
             tradesExecuted++;
           }
         }
@@ -333,7 +325,7 @@ const TradingSimulator: React.FC = () => {
         skippedTrades++;
       }
 
-      // Update equity curve for this day
+      // Revised equity curve calculation
       equityCurve.push({
         date,
         equity:
@@ -342,7 +334,7 @@ const TradingSimulator: React.FC = () => {
             const unrealizedPnL =
               pos.leveragedAmount *
               ((currentPrice - pos.entryPrice) / pos.entryPrice);
-            return sum + pos.baseAmount + unrealizedPnL - pos.accumulatedFees;
+            return sum + unrealizedPnL; // Remove baseAmount
           }, 0),
       });
     }
@@ -357,11 +349,10 @@ const TradingSimulator: React.FC = () => {
         (lastPrice - position.entryPrice) / position.entryPrice;
       const pnl = position.leveragedAmount * percentageChange;
 
-      // Add back adjusted capital
-      const amountToReturn =
-        position.baseAmount + pnl - position.accumulatedFees;
-      currentCapital += Math.max(0, amountToReturn);
-      totalProfitLoss += pnl;
+      // When closing a position (in-loop and at simulation end)
+      const amountToReturn = position.baseAmount + pnl;
+      currentCapital += amountToReturn; // Do NOT use Math.max(0, ...)
+      totalProfitLoss += pnl; // P&L is gross of fees
 
       // Add to trade history
       tradeHistory.push({
@@ -415,7 +406,7 @@ const TradingSimulator: React.FC = () => {
     });
   };
 
-  // Helper function to calculate the price at which the stop loss would trigger
+  // Helper function to accurately calculate stop loss price
   const calculateStopLossPrice = (
     highestPrice: number,
     leveragedAmount: number,
@@ -434,6 +425,27 @@ const TradingSimulator: React.FC = () => {
     return diffDays;
   };
 
+  // Helper function to calculate drawdown from equity curve
+  const calculateDrawdown = (
+    equityCurve: { date: string; equity: number }[]
+  ): number => {
+    if (equityCurve.length === 0) return 0;
+
+    let maxDrawdown = 0;
+    let peak = equityCurve[0].equity;
+
+    for (const point of equityCurve) {
+      if (point.equity > peak) {
+        peak = point.equity;
+      } else {
+        const drawdown = (peak - point.equity) / peak;
+        maxDrawdown = Math.max(maxDrawdown, drawdown);
+      }
+    }
+
+    return maxDrawdown;
+  };
+
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat("en-US", {
       style: "currency",
@@ -442,6 +454,16 @@ const TradingSimulator: React.FC = () => {
       maximumFractionDigits: 2,
     }).format(value);
   };
+
+  const calculateTotalPnL = () => {
+    // Sum up the P&L from all trades
+    const totalPnL = results?.tradeHistory.reduce(
+      (sum, trade) => sum + trade.pnl,
+      0
+    );
+    console.log(totalPnL);
+  };
+
   const renderGoldPriceChart = () => {
     if (!results) return null;
 
@@ -688,6 +710,9 @@ const TradingSimulator: React.FC = () => {
           </div> */}
           <Button onClick={runSimulation} className="w-full">
             <Play className="mr-2 h-4 w-4" /> Run Simulation
+          </Button>
+          <Button onClick={calculateTotalPnL} className="w-full">
+            <Play className="mr-2 h-4 w-4" /> calculate pnl
           </Button>
         </CardContent>
       </Card>
