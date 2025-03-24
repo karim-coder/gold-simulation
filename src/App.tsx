@@ -237,17 +237,17 @@ const TradingSimulator: React.FC = () => {
             params.stopLossDollar
           );
 
-          // Calculate P&L
+          // Calculate P&L - keep this separate from fees
           const percentageChange =
             (exitPrice - position.entryPrice) / position.entryPrice;
           const pnl = position.leveragedAmount * percentageChange;
 
           // Add back the base amount plus any profit (or minus any loss)
-          const amountToReturn = position.baseAmount + pnl; // Removed accumulatedFees subtraction
-          currentCapital += amountToReturn; // Removed Math.max(0, ...)
-          totalProfitLoss += pnl;
+          const amountToReturn = position.baseAmount + pnl;
+          currentCapital += amountToReturn;
+          totalProfitLoss += pnl; // Track pure P&L excluding fees
 
-          // Record trade
+          // Record trade - keep P&L and fees separate
           tradeHistory.push({
             entry: position.entryDate,
             exit: date,
@@ -256,14 +256,14 @@ const TradingSimulator: React.FC = () => {
             highestPrice: position.highestPrice,
             baseAmount: position.baseAmount,
             leveragedAmount: position.leveragedAmount,
-            pnl,
-            fees: position.accumulatedFees,
+            pnl: pnl, // Store pure P&L without mixing with fees
+            fees: position.accumulatedFees, // Store fees separately
             daysHeld: calculateDaysHeld(position.entryDate, date),
             remainingCapital: currentCapital,
             capitalAtEntry: position.remainingCapitalAtEntry,
           });
 
-          // Track consecutive losses
+          // Track consecutive losses based on pure P&L
           if (pnl < 0) {
             consecutiveLosses++;
             maxConsecutiveLosses = Math.max(
@@ -302,7 +302,7 @@ const TradingSimulator: React.FC = () => {
             activePositions.push({
               entryPrice: openingPrice,
               entryDate: date,
-              highestPrice: openingPrice,
+              highestPrice: highestPrice, // Use the day's highest price instead of just opening price
               baseAmount,
               leveragedAmount,
               accumulatedFees: 0,
@@ -325,7 +325,7 @@ const TradingSimulator: React.FC = () => {
         skippedTrades++;
       }
 
-      // Revised equity curve calculation
+      // Equity curve calculation
       equityCurve.push({
         date,
         equity:
@@ -334,7 +334,7 @@ const TradingSimulator: React.FC = () => {
             const unrealizedPnL =
               pos.leveragedAmount *
               ((currentPrice - pos.entryPrice) / pos.entryPrice);
-            return sum + unrealizedPnL; // Remove baseAmount
+            return sum + pos.baseAmount + unrealizedPnL; // Don't deduct accumulated fees from equity
           }, 0),
       });
     }
@@ -349,10 +349,10 @@ const TradingSimulator: React.FC = () => {
         (lastPrice - position.entryPrice) / position.entryPrice;
       const pnl = position.leveragedAmount * percentageChange;
 
-      // When closing a position (in-loop and at simulation end)
+      // When closing a position at simulation end
       const amountToReturn = position.baseAmount + pnl;
-      currentCapital += amountToReturn; // Do NOT use Math.max(0, ...)
-      totalProfitLoss += pnl; // P&L is gross of fees
+      currentCapital += amountToReturn;
+      totalProfitLoss += pnl; // Track pure P&L
 
       // Add to trade history
       tradeHistory.push({
@@ -363,8 +363,8 @@ const TradingSimulator: React.FC = () => {
         highestPrice: position.highestPrice,
         baseAmount: position.baseAmount,
         leveragedAmount: position.leveragedAmount,
-        pnl,
-        fees: position.accumulatedFees,
+        pnl: pnl, // Store pure P&L without mixing with fees
+        fees: position.accumulatedFees, // Store fees separately
         daysHeld: calculateDaysHeld(position.entryDate, lastDate),
         remainingCapital: currentCapital,
         capitalAtEntry: position.remainingCapitalAtEntry,
@@ -378,11 +378,16 @@ const TradingSimulator: React.FC = () => {
         highestPrice: position.highestPrice,
         baseAmount: position.baseAmount,
         leveragedAmount: position.leveragedAmount,
-        unrealizedPnl: pnl,
-        accumulatedFees: position.accumulatedFees,
+        unrealizedPnl: pnl, // Pure unrealized P&L
+        accumulatedFees: position.accumulatedFees, // Keep fees separate
         capitalAtEntry: position.remainingCapitalAtEntry,
       });
     });
+
+    // Sort the trade history in ascending order by entry date (oldest first)
+    // tradeHistory.sort(
+    //   (a, b) => new Date(a.entry).getTime() - new Date(b.entry).getTime()
+    // );
 
     // Calculate final metrics
     const successRate =
@@ -412,7 +417,11 @@ const TradingSimulator: React.FC = () => {
     leveragedAmount: number,
     stopLossAmount: number
   ): number => {
+    // Calculate the percentage drop that would cause the stop loss amount to be hit
     const percentageDrop = stopLossAmount / leveragedAmount;
+
+    // Calculate the price at which this percentage drop would occur
+    // This is the price at which the position should be closed
     return highestPrice * (1 - percentageDrop);
   };
 
