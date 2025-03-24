@@ -464,14 +464,14 @@ const TradingSimulator: React.FC = () => {
     }).format(value);
   };
 
-  const calculateTotalPnL = () => {
-    // Sum up the P&L from all trades
-    const totalPnL = results?.tradeHistory.reduce(
-      (sum, trade) => sum + trade.pnl,
-      0
-    );
-    console.log(totalPnL);
-  };
+  // const calculateTotalPnL = () => {
+  //   // Sum up the P&L from all trades
+  //   const totalPnL = results?.tradeHistory.reduce(
+  //     (sum, trade) => sum + trade.pnl,
+  //     0
+  //   );
+  //   console.log(totalPnL);
+  // };
 
   const renderGoldPriceChart = () => {
     if (!results) return null;
