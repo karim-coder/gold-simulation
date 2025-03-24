@@ -720,9 +720,9 @@ const TradingSimulator: React.FC = () => {
           <Button onClick={runSimulation} className="w-full">
             <Play className="mr-2 h-4 w-4" /> Run Simulation
           </Button>
-          <Button onClick={calculateTotalPnL} className="w-full">
+          {/* <Button onClick={calculateTotalPnL} className="w-full">
             <Play className="mr-2 h-4 w-4" /> calculate pnl
-          </Button>
+          </Button> */}
         </CardContent>
       </Card>
 
