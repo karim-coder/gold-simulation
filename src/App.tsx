@@ -858,7 +858,7 @@ const TradingSimulator: React.FC = () => {
                           <th className="p-2 text-right">Base Amount</th>
                           <th className="p-2 text-right">Leveraged Amount</th>
                           <th className="p-2 text-right">Total Fees</th>
-                          <th className="p-2 text-right">Capital At Entry</th>
+                          {/* <th className="p-2 text-right">Capital At Entry</th> */}
                           <th className="p-2 text-right">Unrealized P&L</th>
                         </tr>
                       </thead>
@@ -884,9 +884,9 @@ const TradingSimulator: React.FC = () => {
                             <td className="p-2 text-right text-red-600">
                               {formatCurrency(position.accumulatedFees)}
                             </td>
-                            <td className="p-2 text-right text-red-600">
+                            {/* <td className="p-2 text-right text-red-600">
                               {formatCurrency(position.capitalAtEntry)}
-                            </td>
+                            </td> */}
                             <td
                               className={`p-2 text-right ${
                                 position.unrealizedPnl >= 0
@@ -920,8 +920,8 @@ const TradingSimulator: React.FC = () => {
                       <th className="p-2 text-right">Base Amount</th>
                       <th className="p-2 text-right">Leveraged Amount</th>
                       <th className="p-2 text-right">Total Fees</th>
-                      <th className="p-2 text-right">Remaining Capital</th>
-                      <th className="p-2 text-right">Capital At Entry</th>
+                      {/* <th className="p-2 text-right">Remaining Capital</th> */}
+                      {/* <th className="p-2 text-right">Capital At Entry</th> */}
                       <th className="p-2 text-right">P&L</th>
                     </tr>
                   </thead>
@@ -958,12 +958,12 @@ const TradingSimulator: React.FC = () => {
                         <td className="p-2 text-right text-red-600">
                           {formatCurrency(trade.fees)}
                         </td>
-                        <td className="p-2 text-right text-red-600">
+                        {/* <td className="p-2 text-right text-red-600">
                           {formatCurrency(trade.remainingCapital)}
-                        </td>
-                        <td className="p-2 text-right text-red-600">
+                        </td> */}
+                        {/* <td className="p-2 text-right text-red-600">
                           {formatCurrency(trade.capitalAtEntry)}
-                        </td>
+                        </td> */}
                         <td
                           className={`p-2 text-right ${
                             trade.pnl >= 0 ? "text-green-600" : "text-red-600"
